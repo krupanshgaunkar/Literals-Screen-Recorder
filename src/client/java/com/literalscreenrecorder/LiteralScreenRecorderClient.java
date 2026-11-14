@@ -2,18 +2,16 @@ package com.literalscreenrecorder;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.loader.api.FabricLoader;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.gui.widget.ButtonWidget;
-import net.minecraft.client.option.KeyBinding;
-import net.minecraft.client.util.InputUtil;
-import net.minecraft.text.Text;
-import net.minecraft.util.Formatting;
+import net.minecraft.ChatFormatting;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.Component;
 import org.lwjgl.glfw.GLFW;
 
 import java.io.File;
@@ -22,7 +20,7 @@ import java.io.FileWriter;
 import java.io.IOException;
 
 public class LiteralScreenRecorderClient implements ClientModInitializer {
-    public static KeyBinding openGuiKey;
+    private boolean wasMenuPressed = false;
     private boolean wasStartStopPressed = false;
     private boolean wasClipPressed = false;
 
@@ -30,35 +28,34 @@ public class LiteralScreenRecorderClient implements ClientModInitializer {
     public void onInitializeClient() {
         RecorderConfig.load();
 
-        openGuiKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "Open Recorder GUI",
-                InputUtil.Type.KEYSYM,
-                GLFW.GLFW_KEY_N,
-                "Literal Screen Recorder"
-        ));
-
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (client.player == null) return;
+            if (client.player == null || client.getWindow() == null) return;
+            if (client.screen != null) return;
 
-            while (openGuiKey.wasPressed()) {
-                client.setScreen(new RecorderScreen(client.currentScreen));
-            }
-
-            if (client.currentScreen != null) return;
-
-            long windowHandle = client.getWindow().getHandle();
+            long windowHandle = client.getWindow().getWindow();
             RecorderConfig cfg = RecorderConfig.INSTANCE;
 
+            // Open GUI Key (Default: N)
+            if (cfg.menuKey != GLFW.GLFW_KEY_UNKNOWN) {
+                boolean isMenuPressed = InputConstants.isKeyDown(windowHandle, cfg.menuKey);
+                if (isMenuPressed && !wasMenuPressed) {
+                    client.setScreen(new RecorderScreen(null));
+                }
+                wasMenuPressed = isMenuPressed;
+            }
+
+            // Start/Stop Key (Default: Not Bound)
             if (cfg.startStopKey != GLFW.GLFW_KEY_UNKNOWN) {
-                boolean isPressed = InputUtil.isKeyPressed(windowHandle, cfg.startStopKey);
+                boolean isPressed = InputConstants.isKeyDown(windowHandle, cfg.startStopKey);
                 if (isPressed && !wasStartStopPressed) {
                     toggleRecording();
                 }
                 wasStartStopPressed = isPressed;
             }
 
+            // Clip Key (Default: Not Bound)
             if (cfg.clipKey != GLFW.GLFW_KEY_UNKNOWN) {
-                boolean isPressed = InputUtil.isKeyPressed(windowHandle, cfg.clipKey);
+                boolean isPressed = InputConstants.isKeyDown(windowHandle, cfg.clipKey);
                 if (isPressed && !wasClipPressed) {
                     saveClip();
                 }
@@ -70,22 +67,22 @@ public class LiteralScreenRecorderClient implements ClientModInitializer {
     public static void toggleRecording() {
         RecorderConfig cfg = RecorderConfig.INSTANCE;
         cfg.isRecording = !cfg.isRecording;
-        MinecraftClient client = MinecraftClient.getInstance();
+        Minecraft client = Minecraft.getInstance();
         if (client.player != null) {
             if (cfg.isRecording) {
-                client.player.sendMessage(Text.literal("● [Literal Recorder] Recording Started (" + cfg.quality + " @ " + cfg.fps + " FPS)").formatted(Formatting.GREEN), true);
+                client.player.displayClientMessage(Component.literal("● [Literal Recorder] Recording Started (" + cfg.quality + " @ " + cfg.fps + " FPS)").withStyle(ChatFormatting.GREEN), true);
             } else {
-                client.player.sendMessage(Text.literal("■ [Literal Recorder] Recording Stopped & Saved!").formatted(Formatting.RED), true);
+                client.player.displayClientMessage(Component.literal("■ [Literal Recorder] Recording Stopped & Saved!").withStyle(ChatFormatting.RED), true);
             }
         }
     }
 
     public static void saveClip() {
         RecorderConfig cfg = RecorderConfig.INSTANCE;
-        MinecraftClient client = MinecraftClient.getInstance();
+        Minecraft client = Minecraft.getInstance();
         if (client.player != null) {
             String timeLabel = cfg.clipDuration == 60 ? "1 minute" : cfg.clipDuration + " seconds";
-            client.player.sendMessage(Text.literal("★ [Literal Recorder] Saved clip of the last " + timeLabel + "!").formatted(Formatting.AQUA), true);
+            client.player.displayClientMessage(Component.literal("★ [Literal Recorder] Saved clip of the last " + timeLabel + "!").withStyle(ChatFormatting.AQUA), true);
         }
     }
 
@@ -97,6 +94,7 @@ public class LiteralScreenRecorderClient implements ClientModInitializer {
         public int clipDuration = 30;
         public String quality = "High";
         public int fps = 60;
+        public int menuKey = GLFW.GLFW_KEY_N;
         public int startStopKey = GLFW.GLFW_KEY_UNKNOWN;
         public int clipKey = GLFW.GLFW_KEY_UNKNOWN;
         public transient boolean isRecording = false;
@@ -141,10 +139,10 @@ public class LiteralScreenRecorderClient implements ClientModInitializer {
     public static class RecorderScreen extends Screen {
         private final Screen parent;
         private int listeningForKey = 0;
-        private ButtonWidget clipBtn, bindStartStopBtn, bindClipBtn;
+        private Button clipBtn, bindMenuBtn, bindStartStopBtn, bindClipBtn;
 
         public RecorderScreen(Screen parent) {
-            super(Text.literal("Literal Screen Recorder"));
+            super(Component.literal("Literal Screen Recorder"));
             this.parent = parent;
         }
 
@@ -152,83 +150,90 @@ public class LiteralScreenRecorderClient implements ClientModInitializer {
         protected void init() {
             RecorderConfig cfg = RecorderConfig.INSTANCE;
             int centerX = this.width / 2;
-            int startY = this.height / 2 - 70;
+            int startY = this.height / 2 - 80;
 
-            ButtonWidget startStopBtn = ButtonWidget.builder(getRecordButtonText(), btn -> {
+            Button startStopBtn = Button.builder(getRecordButtonText(), btn -> {
                 toggleRecording();
                 btn.setMessage(getRecordButtonText());
-            }).dimensions(centerX - 155, startY, 150, 20).build();
+            }).bounds(centerX - 155, startY, 150, 20).build();
 
-            clipBtn = ButtonWidget.builder(Text.literal("Save Last " + getDurationLabel(cfg.clipDuration)).formatted(Formatting.AQUA), btn -> saveClip())
-                    .dimensions(centerX + 5, startY, 150, 20).build();
+            clipBtn = Button.builder(Component.literal("Save Last " + getDurationLabel(cfg.clipDuration)).withStyle(ChatFormatting.AQUA), btn -> saveClip())
+                    .bounds(centerX + 5, startY, 150, 20).build();
 
-            ButtonWidget durationBtn = ButtonWidget.builder(Text.literal("Clip Length: " + getDurationLabel(cfg.clipDuration)), btn -> {
+            Button durationBtn = Button.builder(Component.literal("Clip Length: " + getDurationLabel(cfg.clipDuration)), btn -> {
                 cfg.cycleClipDuration();
-                btn.setMessage(Text.literal("Clip Length: " + getDurationLabel(cfg.clipDuration)));
-                clipBtn.setMessage(Text.literal("Save Last " + getDurationLabel(cfg.clipDuration)).formatted(Formatting.AQUA));
-            }).dimensions(centerX - 155, startY + 35, 150, 20).build();
+                btn.setMessage(Component.literal("Clip Length: " + getDurationLabel(cfg.clipDuration)));
+                clipBtn.setMessage(Component.literal("Save Last " + getDurationLabel(cfg.clipDuration)).withStyle(ChatFormatting.AQUA));
+            }).bounds(centerX - 155, startY + 30, 150, 20).build();
 
-            ButtonWidget qualityBtn = ButtonWidget.builder(Text.literal("Quality: " + cfg.quality), btn -> {
+            Button qualityBtn = Button.builder(Component.literal("Quality: " + cfg.quality), btn -> {
                 cfg.cycleQuality();
-                btn.setMessage(Text.literal("Quality: " + cfg.quality));
-            }).dimensions(centerX + 5, startY + 35, 150, 20).build();
+                btn.setMessage(Component.literal("Quality: " + cfg.quality));
+            }).bounds(centerX + 5, startY + 30, 150, 20).build();
 
-            ButtonWidget fpsBtn = ButtonWidget.builder(Text.literal("Target FPS: " + cfg.fps), btn -> {
+            Button fpsBtn = Button.builder(Component.literal("Target FPS: " + cfg.fps), btn -> {
                 cfg.cycleFps();
-                btn.setMessage(Text.literal("Target FPS: " + cfg.fps));
-            }).dimensions(centerX - 75, startY + 60, 150, 20).build();
+                btn.setMessage(Component.literal("Target FPS: " + cfg.fps));
+            }).bounds(centerX - 75, startY + 55, 150, 20).build();
 
-            bindStartStopBtn = ButtonWidget.builder(getKeybindText("Start/Stop Key", cfg.startStopKey, 1), btn -> {
+            bindMenuBtn = Button.builder(getKeybindText("Open GUI Key", cfg.menuKey, 3), btn -> {
+                listeningForKey = (listeningForKey == 3) ? 0 : 3;
+                updateKeybindButtons();
+            }).bounds(centerX - 75, startY + 95, 150, 20).build();
+
+            bindStartStopBtn = Button.builder(getKeybindText("Start/Stop Key", cfg.startStopKey, 1), btn -> {
                 listeningForKey = (listeningForKey == 1) ? 0 : 1;
                 updateKeybindButtons();
-            }).dimensions(centerX - 155, startY + 105, 150, 20).build();
+            }).bounds(centerX - 155, startY + 120, 150, 20).build();
 
-            bindClipBtn = ButtonWidget.builder(getKeybindText("Clip Key", cfg.clipKey, 2), btn -> {
+            bindClipBtn = Button.builder(getKeybindText("Clip Key", cfg.clipKey, 2), btn -> {
                 listeningForKey = (listeningForKey == 2) ? 0 : 2;
                 updateKeybindButtons();
-            }).dimensions(centerX + 5, startY + 105, 150, 20).build();
+            }).bounds(centerX + 5, startY + 120, 150, 20).build();
 
-            ButtonWidget doneBtn = ButtonWidget.builder(Text.literal("Done"), btn -> this.close())
-                    .dimensions(centerX - 50, startY + 140, 100, 20).build();
+            Button doneBtn = Button.builder(Component.literal("Done"), btn -> this.onClose())
+                    .bounds(centerX - 50, startY + 150, 100, 20).build();
 
-            this.addDrawableChild(startStopBtn);
-            this.addDrawableChild(clipBtn);
-            this.addDrawableChild(durationBtn);
-            this.addDrawableChild(qualityBtn);
-            this.addDrawableChild(fpsBtn);
-            this.addDrawableChild(bindStartStopBtn);
-            this.addDrawableChild(bindClipBtn);
-            this.addDrawableChild(doneBtn);
+            this.addRenderableWidget(startStopBtn);
+            this.addRenderableWidget(clipBtn);
+            this.addRenderableWidget(durationBtn);
+            this.addRenderableWidget(qualityBtn);
+            this.addRenderableWidget(fpsBtn);
+            this.addRenderableWidget(bindMenuBtn);
+            this.addRenderableWidget(bindStartStopBtn);
+            this.addRenderableWidget(bindClipBtn);
+            this.addRenderableWidget(doneBtn);
         }
 
-        private Text getRecordButtonText() {
+        private Component getRecordButtonText() {
             return RecorderConfig.INSTANCE.isRecording
-                    ? Text.literal("■ Stop Recording").formatted(Formatting.RED)
-                    : Text.literal("● Start Recording").formatted(Formatting.GREEN);
+                    ? Component.literal("■ Stop Recording").withStyle(ChatFormatting.RED)
+                    : Component.literal("● Start Recording").withStyle(ChatFormatting.GREEN);
         }
 
         private String getDurationLabel(int sec) {
             return sec == 60 ? "1 Min" : sec + " Sec";
         }
 
-        private Text getKeybindText(String label, int keyCode, int buttonId) {
-            if (listeningForKey == buttonId) return Text.literal(label + ": > Press Key <").formatted(Formatting.YELLOW);
-            if (keyCode == GLFW.GLFW_KEY_UNKNOWN) return Text.literal(label + ": Not Bound").formatted(Formatting.GRAY);
-            return Text.literal(label + ": " + InputUtil.fromKeyCode(keyCode, 0).getLocalizedText().getString());
+        private Component getKeybindText(String label, int keyCode, int buttonId) {
+            if (listeningForKey == buttonId) return Component.literal(label + ": > Press Key <").withStyle(ChatFormatting.YELLOW);
+            if (keyCode == GLFW.GLFW_KEY_UNKNOWN) return Component.literal(label + ": Not Bound").withStyle(ChatFormatting.GRAY);
+            return Component.literal(label + ": " + InputConstants.Type.KEYSYM.getOrCreate(keyCode).getDisplayName().getString());
         }
 
         private void updateKeybindButtons() {
             RecorderConfig cfg = RecorderConfig.INSTANCE;
+            bindMenuBtn.setMessage(getKeybindText("Open GUI Key", cfg.menuKey, 3));
             bindStartStopBtn.setMessage(getKeybindText("Start/Stop Key", cfg.startStopKey, 1));
             bindClipBtn.setMessage(getKeybindText("Clip Key", cfg.clipKey, 2));
         }
 
-        @Override
         public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
             if (listeningForKey != 0) {
                 int newKey = (keyCode == GLFW.GLFW_KEY_ESCAPE) ? GLFW.GLFW_KEY_UNKNOWN : keyCode;
                 if (listeningForKey == 1) RecorderConfig.INSTANCE.startStopKey = newKey;
                 else if (listeningForKey == 2) RecorderConfig.INSTANCE.clipKey = newKey;
+                else if (listeningForKey == 3) RecorderConfig.INSTANCE.menuKey = (newKey == GLFW.GLFW_KEY_UNKNOWN) ? GLFW.GLFW_KEY_N : newKey;
                 listeningForKey = 0;
                 RecorderConfig.save();
                 updateKeybindButtons();
@@ -238,21 +243,21 @@ public class LiteralScreenRecorderClient implements ClientModInitializer {
         }
 
         @Override
-        public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-            this.renderBackground(context, mouseX, mouseY, delta);
+        public void render(GuiGraphics graphics, int mouseX, int mouseY, float delta) {
             int centerX = this.width / 2;
-            int startY = this.height / 2 - 70;
-            context.fill(centerX - 170, startY - 35, centerX + 170, startY + 170, 0xCC121212);
-            context.drawBorder(centerX - 170, startY - 35, 340, 205, 0xFF3A3A3A);
-            context.drawCenteredTextWithShadow(this.textRenderer, "Literal Screen Recorder", centerX, startY - 22, 0xFFFFFF);
-            context.drawCenteredTextWithShadow(this.textRenderer, "Hotkeys (Press ESC to unbind)", centerX, startY + 90, 0xAAAAAA);
-            super.render(context, mouseX, mouseY, delta);
+            int startY = this.height / 2 - 80;
+            graphics.fill(centerX - 170, startY - 30, centerX + 170, startY + 180, 0xCC121212);
+            graphics.hLine(centerX - 170, centerX + 170, startY - 30, 0xFF3A3A3A);
+            graphics.hLine(centerX - 170, centerX + 170, startY + 180, 0xFF3A3A3A);
+            graphics.drawCenteredString(this.font, "Literal Screen Recorder", centerX, startY - 18, 0xFFFFFFFF);
+            graphics.drawCenteredString(this.font, "Hotkeys (Press ESC to unbind)", centerX, startY + 82, 0xFFAAAAAA);
+            super.render(graphics, mouseX, mouseY, delta);
         }
 
         @Override
-        public void close() {
+        public void onClose() {
             RecorderConfig.save();
-            if (this.client != null) this.client.setScreen(this.parent);
+            Minecraft.getInstance().setScreen(this.parent);
         }
     }
 }
